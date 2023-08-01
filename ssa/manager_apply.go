@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -130,16 +129,15 @@ func (m *ResourceManager) Apply(ctx context.Context, object *unstructured.Unstru
 func (m *ResourceManager) ApplyAll(ctx context.Context, objects []*unstructured.Unstructured, opts ApplyOptions) (*ChangeSet, error) {
 	sort.Sort(SortableUnstructureds(objects))
 
-	log := ctrl.LoggerFrom(ctx)
-
+	// Results are written to the following arrays from the concurrent goroutines. We use arrays
+	// to avoid complex synchronization. toApply is sparse, slots are only popuplated when there
+	// is an object to apply
 	toApply := make([]*unstructured.Unstructured, len(objects))
 	changes := make([]ChangeSetEntry, len(objects))
 
 	{
-		t := time.Now()
-
 		g, ctx := errgroup.WithContext(ctx)
-		g.SetLimit(4)
+		g.SetLimit(m.concurrency)
 		for i, object := range objects {
 			i, object := i, object
 
@@ -192,16 +190,11 @@ func (m *ResourceManager) ApplyAll(ctx context.Context, objects []*unstructured.
 			})
 		}
 
-		log.Info("spawn-diff*", "duration", time.Since(t).Seconds())
-
 		if err := g.Wait(); err != nil {
 			return nil, err
 		}
-		log.Info("diff-wait", "duration", time.Since(t).Seconds())
-
 	}
 
-	t := time.Now()
 	for _, object := range toApply {
 		if object != nil {
 			appliedObject := object.DeepCopy()
@@ -210,7 +203,6 @@ func (m *ResourceManager) ApplyAll(ctx context.Context, objects []*unstructured.
 			}
 		}
 	}
-	log.Info("actual apply", "duration", time.Since(t).Seconds())
 
 	changeSet := NewChangeSet()
 	changeSet.Append(changes)
